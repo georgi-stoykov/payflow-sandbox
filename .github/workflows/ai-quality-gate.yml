@@ -1,0 +1,104 @@
+# AI quality gate: on every PR, a Claude agent reads the diff, selects the
+# relevant subset of the black-box test suite (payflow-automation repo), runs it
+# against this PR's build, triages failures against the business rules, and
+# posts the report as a PR comment. The job fails unless the agent's verdict is
+# "pass".
+#
+# Auth: CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`). In a
+# production setup an org-managed ANTHROPIC_API_KEY would be used instead —
+# swap the input on the claude-code-action step.
+
+name: AI Quality Gate
+
+on:
+  pull_request:
+
+concurrency:
+  group: quality-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+  id-token: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Checkout test suite
+        uses: actions/checkout@v4
+        with:
+          repository: georgi-stoykov/payflow-automation
+          path: qa
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start PayFlow from the PR branch
+        run: |
+          pip install -r requirements.txt
+          nohup uvicorn main:app --port 8000 > uvicorn.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fs http://127.0.0.1:8000/api/health && exit 0
+            sleep 1
+          done
+          echo "PayFlow did not become healthy" >&2
+          cat uvicorn.log >&2
+          exit 1
+
+      - name: Install test dependencies
+        run: |
+          pip install -r qa/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Install k6
+        uses: grafana/setup-k6-action@v1
+
+      - name: Precompute PR diff summary
+        run: |
+          {
+            echo "## Files changed"
+            git diff --name-status origin/${{ github.base_ref }}...HEAD
+            echo
+            echo "## Stat"
+            git diff --stat origin/${{ github.base_ref }}...HEAD
+          } > qa/pr-diff.txt
+          head -c 2000 qa/pr-diff.txt
+
+      - name: Run the gate agent
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Work inside the qa/ directory (the black-box test suite repo).
+            Follow the skill at qa/.claude/skills/pr-test-gate/SKILL.md exactly.
+            The PR diff summary is in qa/pr-diff.txt. The PayFlow instance built
+            from this PR is running at http://127.0.0.1:8000.
+            Write gate-report.md and gate-verdict.txt into qa/.
+          claude_args: |
+            --max-turns 60
+            --allowedTools "Read,Grep,Glob,Write,Bash(python -m pytest:*),Bash(pytest:*),Bash(k6:*),Bash(SMOKE=1 k6:*),Bash(cd qa:*),Bash(curl -s http://127.0.0.1:8000/api/health)"
+
+      - name: Post report and enforce verdict
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f qa/gate-report.md ]; then
+            gh pr comment ${{ github.event.pull_request.number }} --body-file qa/gate-report.md
+          else
+            gh pr comment ${{ github.event.pull_request.number }} \
+              --body "AI quality gate produced no report — check the workflow run."
+          fi
+          verdict=$(tr -d '[:space:]' < qa/gate-verdict.txt 2>/dev/null || echo missing)
+          echo "Gate verdict: $verdict"
+          [ "$verdict" = "pass" ]
