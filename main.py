@@ -130,6 +130,7 @@ def create_quote(req: QuoteRequest):
         fee = Decimal("0.00")
 
     amount_dec = Decimal(str(req.amount))
+    # Net amount after fee, converted at the locked rate.
     amount_out = money((amount_dec - fee) * rate)
 
     quote = {
