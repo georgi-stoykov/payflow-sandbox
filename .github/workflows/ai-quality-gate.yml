@@ -71,6 +71,9 @@ jobs:
             echo
             echo "## Stat"
             git diff --stat origin/${{ github.base_ref }}...HEAD
+            echo
+            echo "## Diff (truncated to 15000 chars)"
+            git diff origin/${{ github.base_ref }}...HEAD | head -c 15000
           } > qa/pr-diff.txt
           head -c 2000 qa/pr-diff.txt
 
