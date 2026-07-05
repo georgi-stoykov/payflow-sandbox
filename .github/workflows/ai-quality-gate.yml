@@ -102,6 +102,9 @@ jobs:
             gh pr comment ${{ github.event.pull_request.number }} \
               --body "AI quality gate produced no report — check the workflow run."
           fi
-          verdict=$(tr -d '[:space:]' < qa/gate-verdict.txt 2>/dev/null || echo missing)
+          verdict=missing
+          if [ -f qa/gate-verdict.txt ]; then
+            verdict=$(tr -d '[:space:]' < qa/gate-verdict.txt)
+          fi
           echo "Gate verdict: $verdict"
           [ "$verdict" = "pass" ]
