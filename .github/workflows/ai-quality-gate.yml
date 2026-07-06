@@ -150,6 +150,11 @@ jobs:
       issues: write
       id-token: write
     steps:
+      # claude-code-action requires the workspace root to be a checkout of
+      # this repo (it fetches origin/main on startup)
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
       - name: Checkout test suite
         uses: actions/checkout@v4
         with:
