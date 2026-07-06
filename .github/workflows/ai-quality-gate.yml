@@ -1,12 +1,27 @@
-# AI quality gate: on every PR, a Claude agent reads the diff, selects the
-# relevant subset of the black-box test suite (payflow-automation repo), runs it
-# against this PR's build, triages failures against the business rules, and
-# posts the report as a PR comment. The job fails unless the agent's verdict is
-# "pass".
+# AI quality pipeline. Blocking half: on every PR, a Claude agent reads the
+# diff, selects the relevant subset of the black-box test suite
+# (payflow-automation repo), runs it against this PR's build, triages failures
+# against the business rules, and posts the report as a PR comment. The `gate`
+# job fails unless the agent's verdict is "pass".
 #
-# Auth: CLAUDE_CODE_OAUTH_TOKEN secret (from `claude setup-token`). In a
-# production setup an org-managed ANTHROPIC_API_KEY would be used instead —
-# swap the input on the claude-code-action step.
+# Non-blocking half: downstream jobs consume the gate's machine artifact
+# (gate-triage.json — schema in payflow-automation/docs/agent-pipeline.md):
+#   file-bugs      — product-bug triage entries become deduplicated GitHub
+#                    issues on this repo
+#   heal-tests     — test-defect/environment entries become a mechanics-only
+#                    fix PR on the test repo (human-reviewed)
+#   generate-tests — coverage gaps become a candidate-tests PR on the test
+#                    repo (human-reviewed)
+# Only `gate` should be a required status check; the enrichment jobs must never
+# block a merge.
+#
+# Secrets:
+#   CLAUDE_CODE_OAUTH_TOKEN — from `claude setup-token`. In a production setup
+#     an org-managed ANTHROPIC_API_KEY would be used instead — swap the input
+#     on the claude-code-action steps.
+#   QA_REPO_TOKEN — PAT with write access to georgi-stoykov/payflow-automation;
+#     lets heal-tests/generate-tests push branches and open PRs there. If
+#     unset, those two jobs skip themselves.
 
 name: AI Quality Gate
 
@@ -20,6 +35,7 @@ concurrency:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
   id-token: write
 
 jobs:
@@ -86,10 +102,25 @@ jobs:
             Follow the skill at qa/.claude/skills/pr-test-gate/SKILL.md exactly.
             The PR diff summary is in qa/pr-diff.txt. The PayFlow instance built
             from this PR is running at http://127.0.0.1:8000.
-            Write gate-report.md and gate-verdict.txt into qa/.
+            Write gate-report.md, gate-verdict.txt and gate-triage.json into
+            qa/. In gate-triage.json set pr.repo to "${{ github.repository }}",
+            pr.number to ${{ github.event.pull_request.number }} and
+            pr.head_sha to "${{ github.event.pull_request.head.sha }}".
           claude_args: |
             --max-turns 60
             --allowedTools "Read,Grep,Glob,Write,Bash(python -m pytest:*),Bash(pytest:*),Bash(k6:*),Bash(SMOKE=1 k6:*),Bash(cd qa:*),Bash(curl -s http://127.0.0.1:8000/api/health)"
+
+      - name: Upload gate artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-artifacts
+          if-no-files-found: warn
+          path: |
+            qa/gate-report.md
+            qa/gate-verdict.txt
+            qa/gate-triage.json
+            qa/pr-diff.txt
 
       - name: Post report and enforce verdict
         if: always()
@@ -108,3 +139,219 @@ jobs:
           fi
           echo "Gate verdict: $verdict"
           [ "$verdict" = "pass" ]
+
+  file-bugs:
+    needs: gate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    steps:
+      - name: Checkout test suite
+        uses: actions/checkout@v4
+        with:
+          repository: georgi-stoykov/payflow-automation
+          path: qa
+
+      - name: Download gate artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: gate-artifacts
+          path: artifacts
+
+      - name: Count product-bug triage entries
+        id: triage
+        run: |
+          count=$(jq '[.failures // [] | .[] | select(.category == "product-bug")] | length' \
+            artifacts/gate-triage.json 2>/dev/null || echo 0)
+          echo "product_bugs=$count" >> "$GITHUB_OUTPUT"
+          echo "Product-bug entries: $count"
+
+      - name: Run the bug-filer agent
+        if: steps.triage.outputs.product_bugs != '0'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ github.token }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Follow the skill at qa/.claude/skills/file-bugs/SKILL.md exactly.
+            The gate artifacts are in artifacts/ (gate-triage.json,
+            gate-report.md). File issues on ${{ github.repository }}.
+            Context: PR #${{ github.event.pull_request.number }}, gate run
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}.
+          claude_args: |
+            --max-turns 30
+            --allowedTools "Read,Grep,Glob,Bash(jq:*),Bash(gh issue:*),Bash(gh label:*),Bash(gh search:*)"
+
+  heal-tests:
+    needs: gate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Download gate artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: gate-artifacts
+          path: artifacts
+
+      - name: Decide whether to heal
+        id: decide
+        env:
+          QA_REPO_TOKEN: ${{ secrets.QA_REPO_TOKEN }}
+        run: |
+          count=$(jq '[.failures // [] | .[] | select(.category == "test-defect" or .category == "environment")] | length' \
+            artifacts/gate-triage.json 2>/dev/null || echo 0)
+          if [ -z "$QA_REPO_TOKEN" ]; then
+            echo "QA_REPO_TOKEN not set — skipping heal job"
+            count=0
+          fi
+          echo "heal_candidates=$count" >> "$GITHUB_OUTPUT"
+          echo "Heal candidates: $count"
+
+      - name: Checkout test suite (writable)
+        if: steps.decide.outputs.heal_candidates != '0'
+        uses: actions/checkout@v4
+        with:
+          repository: georgi-stoykov/payflow-automation
+          path: qa
+          token: ${{ secrets.QA_REPO_TOKEN }}
+
+      - name: Set up Python
+        if: steps.decide.outputs.heal_candidates != '0'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start PayFlow from the PR branch
+        if: steps.decide.outputs.heal_candidates != '0'
+        run: |
+          pip install -r requirements.txt
+          nohup uvicorn main:app --port 8000 > uvicorn.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fs http://127.0.0.1:8000/api/health && exit 0
+            sleep 1
+          done
+          echo "PayFlow did not become healthy" >&2
+          exit 1
+
+      - name: Install test dependencies
+        if: steps.decide.outputs.heal_candidates != '0'
+        run: |
+          pip install -r qa/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run the healer agent
+        if: steps.decide.outputs.heal_candidates != '0'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.QA_REPO_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Work inside the qa/ directory (the black-box test suite repo).
+            Follow the skill at qa/.claude/skills/heal-tests/SKILL.md exactly.
+            The gate artifacts are in artifacts/. The PayFlow instance built
+            from PR #${{ github.event.pull_request.number }} is running at
+            http://127.0.0.1:8000. If you produce a fix, push it as branch
+            ai-heal/pr-${{ github.event.pull_request.number }} and open a PR
+            on georgi-stoykov/payflow-automation.
+          claude_args: |
+            --max-turns 80
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(jq:*),Bash(python -m pytest:*),Bash(pytest:*),Bash(cd qa:*),Bash(git:*),Bash(gh pr:*),Bash(gh label:*),Bash(curl -s http://127.0.0.1:8000/*)"
+
+  generate-tests:
+    needs: gate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+
+      - name: Download gate artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: gate-artifacts
+          path: artifacts
+
+      - name: Decide whether to generate
+        id: decide
+        env:
+          QA_REPO_TOKEN: ${{ secrets.QA_REPO_TOKEN }}
+        run: |
+          count=$(jq '.coverage_gaps // [] | length' \
+            artifacts/gate-triage.json 2>/dev/null || echo 0)
+          if [ -z "$QA_REPO_TOKEN" ]; then
+            echo "QA_REPO_TOKEN not set — skipping generation job"
+            count=0
+          fi
+          echo "gaps=$count" >> "$GITHUB_OUTPUT"
+          echo "Coverage gaps: $count"
+
+      - name: Checkout test suite (writable)
+        if: steps.decide.outputs.gaps != '0'
+        uses: actions/checkout@v4
+        with:
+          repository: georgi-stoykov/payflow-automation
+          path: qa
+          token: ${{ secrets.QA_REPO_TOKEN }}
+
+      - name: Set up Python
+        if: steps.decide.outputs.gaps != '0'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Start PayFlow from the PR branch
+        if: steps.decide.outputs.gaps != '0'
+        run: |
+          pip install -r requirements.txt
+          nohup uvicorn main:app --port 8000 > uvicorn.log 2>&1 &
+          for i in $(seq 1 30); do
+            curl -fs http://127.0.0.1:8000/api/health && exit 0
+            sleep 1
+          done
+          echo "PayFlow did not become healthy" >&2
+          exit 1
+
+      - name: Install test dependencies
+        if: steps.decide.outputs.gaps != '0'
+        run: |
+          pip install -r qa/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run the test-generator agent
+        if: steps.decide.outputs.gaps != '0'
+        uses: anthropics/claude-code-action@v1
+        env:
+          GH_TOKEN: ${{ secrets.QA_REPO_TOKEN }}
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            Work inside the qa/ directory (the black-box test suite repo).
+            Follow the skill at qa/.claude/skills/generate-tests/SKILL.md
+            exactly. The gate artifacts are in artifacts/. The PayFlow instance
+            built from PR #${{ github.event.pull_request.number }} is running
+            at http://127.0.0.1:8000. If you produce candidate tests, push
+            them as branch ai-tests/pr-${{ github.event.pull_request.number }}
+            and open a PR on georgi-stoykov/payflow-automation.
+          claude_args: |
+            --max-turns 80
+            --allowedTools "Read,Grep,Glob,Edit,Write,Bash(jq:*),Bash(python -m pytest:*),Bash(pytest:*),Bash(cd qa:*),Bash(git:*),Bash(gh pr:*),Bash(gh label:*),Bash(curl -s http://127.0.0.1:8000/*)"
