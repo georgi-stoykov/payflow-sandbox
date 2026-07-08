@@ -47,7 +47,11 @@ RATES = {
     ("EUR", "BTC"): Decimal("0.0000112"),
     ("EUR", "ETH"): Decimal("0.000305"),
     ("GBP", "USDC"): Decimal("1.2691"),
+    ("GBP", "BTC"): Decimal("0.0000131"),
+    ("GBP", "ETH"): Decimal("0.000357"),
     ("USD", "USDC"): Decimal("0.9998"),
+    ("USD", "BTC"): Decimal("0.0000103"),
+    ("USD", "ETH"): Decimal("0.000281"),
     ("USDC", "EUR"): Decimal("0.9212"),
 }
 FEE_RATE = Decimal("0.015")  # 1.5%
