@@ -120,6 +120,8 @@ def create_quote(req: QuoteRequest):
         raise HTTPException(422, "amount must be positive")
 
     amount_dec = Decimal(str(req.amount))
+    if amount_dec.as_tuple().exponent < -2:
+        raise HTTPException(422, "amount must have at most 2 decimal places")
     if amount_dec > MAX_AMOUNT:
         raise HTTPException(422, f"amount exceeds single-payment maximum of {MAX_AMOUNT}")
 
