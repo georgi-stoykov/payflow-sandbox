@@ -52,7 +52,6 @@ RATES = {
     ("USD", "USDC"): Decimal("0.9998"),
     ("USD", "BTC"): Decimal("0.0000103"),
     ("USD", "ETH"): Decimal("0.000281"),
-    ("USDC", "EUR"): Decimal("0.9212"),
 }
 FEE_RATE = Decimal("0.015")  # 1.5%
 QUOTE_TTL_SECONDS = 120
