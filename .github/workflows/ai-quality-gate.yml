@@ -153,6 +153,8 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # the relay job dispatches this workflow as the github-actions bot
+          allowed_bots: github-actions
           prompt: |
             Work inside the qa/ directory (the black-box test suite repo).
             Follow the skill at qa/.claude/skills/pr-test-gate/SKILL.md exactly.
@@ -243,6 +245,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # the relay job dispatches this workflow as the github-actions bot
+          allowed_bots: github-actions
           prompt: |
             Follow the skill at qa/.claude/skills/file-bugs/SKILL.md exactly.
             The gate artifacts are in artifacts/ (gate-triage.json,
@@ -325,6 +329,8 @@ jobs:
           GH_TOKEN: ${{ secrets.QA_REPO_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # the relay job dispatches this workflow as the github-actions bot
+          allowed_bots: github-actions
           prompt: |
             Work inside the qa/ directory (the black-box test suite repo).
             Follow the skill at qa/.claude/skills/heal-tests/SKILL.md exactly.
@@ -408,6 +414,8 @@ jobs:
           GH_TOKEN: ${{ secrets.QA_REPO_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # the relay job dispatches this workflow as the github-actions bot
+          allowed_bots: github-actions
           prompt: |
             Work inside the qa/ directory (the black-box test suite repo).
             Follow the skill at qa/.claude/skills/generate-tests/SKILL.md
