@@ -41,6 +41,12 @@ env:
   # quoted because the '#' would otherwise start a YAML comment
   RUN_CONTEXT: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('push to main ({0})', github.sha) }}"
   RUN_SLUG: "${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', github.run_id) }}"
+  # Seeded-defect mode for the PayFlow build under test. Toggled repo-wide via
+  # the Actions variable BUGS (Settings → Secrets and variables → Actions →
+  # Variables, or `gh variable set BUGS --body off`); defaults to on. Exported
+  # to every step, so all three "Start PayFlow" uvicorn processes inherit it —
+  # a real env var beats .env in main.py.
+  BUGS: "${{ vars.BUGS || 'on' }}"
 
 permissions:
   contents: read

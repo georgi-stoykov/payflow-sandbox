@@ -21,7 +21,7 @@ uvicorn main:app --reload --port 8000
 
 ## Modes (env vars, shell overrides `.env`)
 
-- `BUGS=on|off` (default `on`) — toggles the seeded defects below. Set once at startup; restart to change.
+- `BUGS=on|off` (default `on`) — toggles the seeded defects below. Set once at startup; restart to change. In CI, the quality-gate workflow sets this from the repo-level GitHub Actions variable `BUGS` (`gh variable set BUGS --body off`; unset = `on`), so the gate can run against either mode without a code change.
 - `CHAOS=on|off` (default `off`) — randomizes every UI `id`/`data-testid` with a per-boot suffix to exercise self-healing locators. Also togglable per-request via `?chaos=1`. Accessible labels/roles/visible text stay stable in chaos mode by design, so locator strategies should prefer those over raw ids.
 
 ## Architecture
