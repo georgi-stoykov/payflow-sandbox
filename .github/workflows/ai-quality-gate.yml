@@ -28,18 +28,29 @@ name: AI Quality Gate
 
 on:
   pull_request:        # opened, synchronize (new pushes to the PR), reopened
+  # claude-code-action does not run on push events, so pushes to main are
+  # relayed to a workflow_dispatch of this same workflow (the `relay` job).
+  # workflow_dispatch also gives a manual "Run workflow" button.
   push:
-    branches: [main]   # post-merge verification: PR merges and direct pushes
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      diff_base:
+        description: "Base sha for the diff (defaults to HEAD^1)"
+        required: false
+        default: ""
 
 concurrency:
-  group: quality-gate-${{ github.event.pull_request.number || github.ref }}
+  # event_name in the fallback keeps a push's relay run and the dispatch run
+  # it triggers from cancelling each other
+  group: quality-gate-${{ github.event.pull_request.number || format('{0}-{1}', github.ref, github.event_name) }}
   cancel-in-progress: true
 
 # Run context that works for both event types: a human-readable label for
 # prompts/comments and a slug for agent branch names.
 env:
   # quoted because the '#' would otherwise start a YAML comment
-  RUN_CONTEXT: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('push to main ({0})', github.sha) }}"
+  RUN_CONTEXT: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('main ({0})', github.sha) }}"
   RUN_SLUG: "${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', github.run_id) }}"
   # Seeded-defect mode for the PayFlow build under test. Toggled repo-wide via
   # the Actions variable BUGS (Settings → Secrets and variables → Actions →
@@ -55,7 +66,27 @@ permissions:
   id-token: write
 
 jobs:
+  # Pushes to main can't run claude-code-action directly ("Unsupported event
+  # type: push"), so re-enter this workflow as a workflow_dispatch. Triggering
+  # workflow_dispatch with GITHUB_TOKEN is an explicit exception to GitHub's
+  # rule against GITHUB_TOKEN-initiated events starting new workflow runs.
+  relay:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Re-dispatch as workflow_dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${{ github.repository }}/actions/workflows/ai-quality-gate.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[diff_base]=${{ github.event.before }}"
+
   gate:
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -99,11 +130,11 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANGE="origin/${{ github.base_ref }}...HEAD"
-          elif git rev-parse -q --verify "${{ github.event.before }}^{commit}" >/dev/null; then
-            # push event: diff what this push actually changed
-            RANGE="${{ github.event.before }}...HEAD"
+          elif git rev-parse -q --verify "${{ inputs.diff_base }}^{commit}" >/dev/null; then
+            # dispatch relayed from a push: diff what that push changed
+            RANGE="${{ inputs.diff_base }}...HEAD"
           else
-            # force-push or unknown before-sha: fall back to the last commit
+            # manual dispatch or unknown base sha: fall back to the last commit
             RANGE="HEAD^1...HEAD"
           fi
           {
@@ -171,7 +202,7 @@ jobs:
 
   file-bugs:
     needs: gate
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.gate.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -224,7 +255,7 @@ jobs:
 
   heal-tests:
     needs: gate
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.gate.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
@@ -307,7 +338,7 @@ jobs:
 
   generate-tests:
     needs: gate
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.gate.result != 'skipped' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
     permissions:
