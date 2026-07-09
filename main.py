@@ -47,10 +47,14 @@ RATES = {
     ("EUR", "BTC"): Decimal("0.0000112"),
     ("EUR", "ETH"): Decimal("0.000305"),
     ("GBP", "USDC"): Decimal("1.2691"),
+    ("GBP", "BTC"): Decimal("0.0000131"),
+    ("GBP", "ETH"): Decimal("0.000357"),
     ("USD", "USDC"): Decimal("0.9998"),
-    ("USDC", "EUR"): Decimal("0.9212"),
+    ("USD", "BTC"): Decimal("0.0000103"),
+    ("USD", "ETH"): Decimal("0.000281"),
 }
 FEE_RATE = Decimal("0.015")  # 1.5%
+MAX_AMOUNT = Decimal("50000")  # single-payment maximum in sell currency
 QUOTE_TTL_SECONDS = 120
 
 CUSTOMERS = {
@@ -115,6 +119,12 @@ def create_quote(req: QuoteRequest):
     if not BUGS and req.amount <= 0:
         raise HTTPException(422, "amount must be positive")
 
+    amount_dec = Decimal(str(req.amount))
+    if amount_dec.as_tuple().exponent < -2:
+        raise HTTPException(422, "amount must have at most 2 decimal places")
+    if amount_dec > MAX_AMOUNT:
+        raise HTTPException(422, f"amount exceeds single-payment maximum of {MAX_AMOUNT}")
+
     rate = RATES[pair]
 
     if BUGS:
@@ -129,7 +139,7 @@ def create_quote(req: QuoteRequest):
     if BUGS and req.amount >= 50000:
         fee = Decimal("0.00")
 
-    amount_dec = Decimal(str(req.amount))
+    # Net amount after fee, converted at the locked rate.
     amount_out = money((amount_dec - fee) * rate)
 
     quote = {
