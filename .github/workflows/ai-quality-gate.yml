@@ -1,4 +1,5 @@
-# AI quality pipeline. Blocking half: on every PR, a Claude agent reads the
+# AI quality pipeline. Blocking half: on every PR — and, as post-merge
+# verification, on every push to main — a Claude agent reads the
 # diff, selects the relevant subset of the black-box test suite
 # (payflow-automation repo), runs it against this PR's build, triages failures
 # against the business rules, and posts the report as a PR comment. The `gate`
@@ -26,11 +27,19 @@
 name: AI Quality Gate
 
 on:
-  pull_request:
+  pull_request:        # opened, synchronize (new pushes to the PR), reopened
+  push:
+    branches: [main]   # post-merge verification: PR merges and direct pushes
 
 concurrency:
-  group: quality-gate-${{ github.event.pull_request.number }}
+  group: quality-gate-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
+
+# Run context that works for both event types: a human-readable label for
+# prompts/comments and a slug for agent branch names.
+env:
+  RUN_CONTEXT: ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('push to main ({0})', github.sha) }}
+  RUN_SLUG: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', github.run_id) }}
 
 permissions:
   contents: read
@@ -79,17 +88,26 @@ jobs:
       - name: Install k6
         uses: grafana/setup-k6-action@v1
 
-      - name: Precompute PR diff summary
+      - name: Precompute diff summary
         run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            RANGE="origin/${{ github.base_ref }}...HEAD"
+          elif git rev-parse -q --verify "${{ github.event.before }}^{commit}" >/dev/null; then
+            # push event: diff what this push actually changed
+            RANGE="${{ github.event.before }}...HEAD"
+          else
+            # force-push or unknown before-sha: fall back to the last commit
+            RANGE="HEAD^1...HEAD"
+          fi
           {
             echo "## Files changed"
-            git diff --name-status origin/${{ github.base_ref }}...HEAD
+            git diff --name-status "$RANGE"
             echo
             echo "## Stat"
-            git diff --stat origin/${{ github.base_ref }}...HEAD
+            git diff --stat "$RANGE"
             echo
             echo "## Diff (truncated to 15000 chars)"
-            git diff origin/${{ github.base_ref }}...HEAD | head -c 15000
+            git diff "$RANGE" | head -c 15000
           } > qa/pr-diff.txt
           head -c 2000 qa/pr-diff.txt
 
@@ -104,8 +122,9 @@ jobs:
             from this PR is running at http://127.0.0.1:8000.
             Write gate-report.md, gate-verdict.txt and gate-triage.json into
             qa/. In gate-triage.json set pr.repo to "${{ github.repository }}",
-            pr.number to ${{ github.event.pull_request.number }} and
-            pr.head_sha to "${{ github.event.pull_request.head.sha }}".
+            pr.number to ${{ github.event.pull_request.number || 0 }} (0 means
+            this run verifies a push to main, not a PR) and pr.head_sha to
+            "${{ github.event.pull_request.head.sha || github.sha }}".
           claude_args: |
             --max-turns 60
             --allowedTools "Read,Grep,Glob,Write,Bash(python -m pytest:*),Bash(pytest:*),Bash(k6:*),Bash(SMOKE=1 k6:*),Bash(cd qa:*),Bash(curl -s http://127.0.0.1:8000/api/health)"
@@ -127,11 +146,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if [ -f qa/gate-report.md ]; then
+          if [ ! -f qa/gate-report.md ]; then
+            echo "AI quality gate produced no report — check the workflow run." > qa/gate-report.md
+          fi
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
             gh pr comment ${{ github.event.pull_request.number }} --body-file qa/gate-report.md
           else
-            gh pr comment ${{ github.event.pull_request.number }} \
-              --body "AI quality gate produced no report — check the workflow run."
+            # push to main: no PR to comment on — publish to the run summary
+            cat qa/gate-report.md >> "$GITHUB_STEP_SUMMARY"
           fi
           verdict=missing
           if [ -f qa/gate-verdict.txt ]; then
@@ -187,7 +209,7 @@ jobs:
             Follow the skill at qa/.claude/skills/file-bugs/SKILL.md exactly.
             The gate artifacts are in artifacts/ (gate-triage.json,
             gate-report.md). File issues on ${{ github.repository }}.
-            Context: PR #${{ github.event.pull_request.number }}, gate run
+            Context: ${{ env.RUN_CONTEXT }}, gate run
             ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}.
           claude_args: |
             --max-turns 30
@@ -268,11 +290,10 @@ jobs:
           prompt: |
             Work inside the qa/ directory (the black-box test suite repo).
             Follow the skill at qa/.claude/skills/heal-tests/SKILL.md exactly.
-            The gate artifacts are in artifacts/. The PayFlow instance built
-            from PR #${{ github.event.pull_request.number }} is running at
-            http://127.0.0.1:8000. If you produce a fix, push it as branch
-            ai-heal/pr-${{ github.event.pull_request.number }} and open a PR
-            on georgi-stoykov/payflow-automation.
+            The gate artifacts are in artifacts/. The PayFlow build under test
+            (${{ env.RUN_CONTEXT }}) is running at http://127.0.0.1:8000. If
+            you produce a fix, push it as branch ai-heal/${{ env.RUN_SLUG }}
+            and open a PR on georgi-stoykov/payflow-automation.
           claude_args: |
             --max-turns 80
             --allowedTools "Read,Grep,Glob,Edit,Write,Bash(jq:*),Bash(python -m pytest:*),Bash(pytest:*),Bash(cd qa:*),Bash(git:*),Bash(gh pr:*),Bash(gh label:*),Bash(curl -s http://127.0.0.1:8000/*)"
@@ -352,10 +373,10 @@ jobs:
           prompt: |
             Work inside the qa/ directory (the black-box test suite repo).
             Follow the skill at qa/.claude/skills/generate-tests/SKILL.md
-            exactly. The gate artifacts are in artifacts/. The PayFlow instance
-            built from PR #${{ github.event.pull_request.number }} is running
-            at http://127.0.0.1:8000. If you produce candidate tests, push
-            them as branch ai-tests/pr-${{ github.event.pull_request.number }}
+            exactly. The gate artifacts are in artifacts/. The PayFlow build
+            under test (${{ env.RUN_CONTEXT }}) is running at
+            http://127.0.0.1:8000. If you produce candidate tests, push
+            them as branch ai-tests/${{ env.RUN_SLUG }}
             and open a PR on georgi-stoykov/payflow-automation.
           claude_args: |
             --max-turns 80
