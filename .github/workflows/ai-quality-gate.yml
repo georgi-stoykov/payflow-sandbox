@@ -38,8 +38,9 @@ concurrency:
 # Run context that works for both event types: a human-readable label for
 # prompts/comments and a slug for agent branch names.
 env:
-  RUN_CONTEXT: ${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('push to main ({0})', github.sha) }}
-  RUN_SLUG: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', github.run_id) }}
+  # quoted because the '#' would otherwise start a YAML comment
+  RUN_CONTEXT: "${{ github.event_name == 'pull_request' && format('PR #{0}', github.event.pull_request.number) || format('push to main ({0})', github.sha) }}"
+  RUN_SLUG: "${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('main-{0}', github.run_id) }}"
 
 permissions:
   contents: read
